@@ -1,6 +1,23 @@
 import bcrypt from 'bcrypt';
+import jwt from 'jsonwebtoken';
 import User from '../models/userModel.js';
 import Log from '../models/logs.js';
+
+const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-production';
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '1h';
+
+const createAuthToken = (user) => {
+    return jwt.sign(
+        {
+            sub: user._id.toString(),
+            role: user.role,
+        },
+        JWT_SECRET,
+        {
+            expiresIn: JWT_EXPIRES_IN,
+        }
+    );
+};
 
 /**
  * @desc    Register a new user
@@ -88,6 +105,8 @@ export const register = async (req, res) => {
             // Don't fail registration if logging fails
         }
 
+        const token = createAuthToken(newUser);
+
         // Return user data (excluding password)
         res.status(201).json({
             success: true,
@@ -98,7 +117,8 @@ export const register = async (req, res) => {
                 email: newUser.email,
                 role: newUser.role,
                 createdAt: newUser.createdAt
-            }
+            },
+            token
         });
 
     } catch (error) {
@@ -249,6 +269,8 @@ export const login = async (req, res) => {
         }
 
         // Password is valid - successful login
+        const token = createAuthToken(user);
+
         // Update last login and reset failed attempts
         user.lastLogin = new Date();
         user.failedLoginAttempts = 0;
@@ -267,7 +289,8 @@ export const login = async (req, res) => {
                 additional_info: {
                     loginMethod: 'username_or_email',
                     lastLogin: user.lastLogin
-                }
+                },
+                tokenIssuedAt: new Date()
             });
         } catch (logError) {
             console.error('Error logging successful login:', logError);
@@ -284,7 +307,8 @@ export const login = async (req, res) => {
                 email: user.email,
                 role: user.role,
                 lastLogin: user.lastLogin
-            }
+            },
+            token
         });
 
     } catch (error) {

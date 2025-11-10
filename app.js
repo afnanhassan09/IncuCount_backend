@@ -1,5 +1,6 @@
 import express from 'express';
 import authRoutes from './routes/authRoutes.js';
+import colonyProfileRoutes from './routes/colonyProfileRoutes.js';
 import dotenv from 'dotenv';
 import mongoose from 'mongoose';
 import cors from 'cors';
@@ -25,6 +26,7 @@ app.use((req, res, next) => {
 
 // Routes
 app.use('/api/auth', authRoutes);
+app.use('/api/colony-profiles', colonyProfileRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -110,7 +112,7 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`📡 API endpoints available at http://localhost:${PORT}/api/auth`);
+    console.log(`📡 API endpoints available at http://localhost:${PORT}/api`);
 });
 
 export default app;

@@ -31,11 +31,11 @@ This document describes the complete authentication flow for the Bacterial Colon
 3. Form submission triggers handleLogin() method
 4. Validates input fields are not empty
 5. Sets button to loading state
-6. Invokes IPC: ipcRenderer.invoke('auth-login', { username, password })
-7. Waits for response from main process
+6. Calls API service: window.apiService.login(username, password)
+7. Waits for HTTP response from backend
 8. On success:
    - Shows success message
-   - After 1 second delay, calls appInstance.handleLogin(result.userData)
+   - After 1 second delay, calls appInstance.handleLogin(result.userData, result.token)
 9. On failure:
    - Shows error message
 10. Resets button loading state
@@ -44,37 +44,38 @@ This document describes the complete authentication flow for the Bacterial Colon
 **Key Code**:
 ```javascript
 async handleLogin() {
-    const username = usernameInput.value.trim();
-    const password = passwordInput.value;
-    
-    if (!username || !password) {
-        this.showMessage('Please enter both username/email and password', 'error');
-        return;
-    }
-    
-    const result = await ipcRenderer.invoke('auth-login', { 
-        username: username, 
-        password: password 
-    });
-    
+    const result = await window.apiService.login(username, password);
+
     if (result.success) {
-        // Call app.handleLogin() with userData
-        appInstance.handleLogin(result.userData);
+        appInstance.handleLogin(result.userData, result.token);
+    } else {
+        this.showMessage(result.message, 'error');
     }
 }
 ```
 
-#### **3. App Manager - `app.js`**
+#### **3. API Service - `api.js`**
+- **Location**: `BacterialColonyElectron/app/renderer/js/api.js`
+- **Class**: `APIService`
+- **Role**: Wraps fetch calls to REST backend, automatically attaching the persisted JWT token (Authorization header) when present.
+
+```javascript
+const storedToken = Utils.getLocalStorage('incucount_auth_token', null);
+if (storedToken) {
+    defaultOptions.headers.Authorization = `Bearer ${storedToken}`;
+}
+```
+
+#### **4. App Manager - `app.js`**
 - **Location**: `BacterialColonyElectron/app/renderer/js/app.js`
 - **Class**: `IncuCountApp`
 - **Method**: `handleLogin(userData)`
 
 **Flow Steps**:
 ```javascript
-1. Receives userData from auth manager
-2. Sets this.currentUser = userData
-3. Persists session to localStorage:
-   - window.Utils.setLocalStorage('incucount_current_user', userData)
+1. Receives userData and optional token from auth manager
+2. Builds `sessionUser` object and persists fresh token (if provided) under `incucount_auth_token`
+3. Persists sessionUser to localStorage under `incucount_current_user`
 4. Shows main screen: this.showScreen('main')
 5. Determines dashboard to show:
    - If admin (email === 'admin' && username === 'admin'):
@@ -85,11 +86,14 @@ async handleLogin() {
 
 **Key Code**:
 ```javascript
-async handleLogin(userData) {
-    this.currentUser = userData;
-    
-    // Persist session
-    window.Utils.setLocalStorage('incucount_current_user', userData);
+async handleLogin(userData, token = null) {
+    const sessionUser = { ...userData };
+    if (token) {
+        sessionUser.token = token;
+        window.Utils.setLocalStorage('incucount_auth_token', token);
+    }
+    this.currentUser = sessionUser;
+    window.Utils.setLocalStorage('incucount_current_user', sessionUser);
     
     this.showScreen('main');
     if (userData.email === 'admin' && userData.username === 'admin') {
@@ -117,114 +121,24 @@ async handleLogin(userData) {
 ```
 
 **Key Code**:
+Backend authentication is now handled entirely by the Express/Mongo service:
+
+#### **5. Backend Controller - `Backend/controllers/authController.js`**
+- Validates credentials, enforces lockout logic, and on success issues a JWT:
+
 ```javascript
-ipcMain.handle('auth-login', async (event, credentials) => {
-    return await this.dbManager.authenticateUser(
-        credentials.username, 
-        credentials.password
-    );
+const token = createAuthToken(user);
+res.status(200).json({
+    success: true,
+    message: 'Login successful!',
+    userData: { ... },
+    token
 });
 ```
 
-#### **5. Database Manager - `databaseManager.js`**
-- **Location**: `BacterialColonyElectron/app/main/database/databaseManager.js`
-- **Method**: `authenticateUser(usernameOrEmail, password)`
-
-**Flow Steps**:
-```javascript
-1. Query database for user by username OR email:
-   SELECT * FROM users WHERE username = ? OR email = ?
-
-2. If user not found:
-   → Return { success: false, message: 'Invalid credentials', userData: null }
-
-3. Check if account is locked:
-   - If locked_until exists and current time < locked_until:
-     → Return { success: false, message: 'Account temporarily locked...', userData: null }
-
-4. Verify password:
-   - Uses bcrypt: verifyPassword(password, storedHash, salt)
-   
-5. If password valid:
-   a. Reset failed attempts: UPDATE users SET failed_attempts = 0, locked_until = NULL, last_login = NOW()
-   b. Log activity: await this.logActivity(user.id, 'login')
-   c. Return { 
-        success: true, 
-        message: 'Login successful!', 
-        userData: { id, username, email } 
-      }
-
-6. If password invalid:
-   a. Increment failed attempts: failed_attempts + 1
-   b. If failed_attempts >= 5:
-      - Lock account for 15 minutes: locked_until = NOW() + 15 minutes
-   c. Update database with new failed_attempts and locked_until
-   d. Log activity: await this.logActivity(user.id, 'failed_login')
-   e. Return appropriate error message
-```
-
-**Key Code**:
-```javascript
-async authenticateUser(usernameOrEmail, password) {
-    // 1. Find user
-    const user = await this.getQuery(
-        'SELECT id, username, email, password_hash, salt, failed_attempts, locked_until 
-         FROM users WHERE username = ? OR email = ?',
-        [usernameOrEmail, usernameOrEmail]
-    );
-    
-    // 2. Check if user exists
-    if (!user) {
-        return { success: false, message: 'Invalid credentials', userData: null };
-    }
-    
-    // 3. Check if locked
-    if (user.locked_until && new Date() < new Date(user.locked_until)) {
-        return { success: false, message: 'Account temporarily locked...', userData: null };
-    }
-    
-    // 4. Verify password
-    const isValid = await this.verifyPassword(password, user.password_hash, user.salt);
-    
-    if (isValid) {
-        // 5. Success - reset counters and log
-        await this.runQuery(
-            'UPDATE users SET failed_attempts = 0, locked_until = NULL, last_login = ? WHERE id = ?',
-            [new Date().toISOString(), user.id]
-        );
-        await this.logActivity(user.id, 'login');
-        
-        return {
-            success: true,
-            message: 'Login successful!',
-            userData: { id: user.id, username: user.username, email: user.email }
-        };
-    } else {
-        // 6. Failed - increment attempts
-        const newFailedAttempts = user.failed_attempts + 1;
-        let lockedUntil = null;
-        
-        if (newFailedAttempts >= 5) {
-            lockedUntil = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-        }
-        
-        await this.runQuery(
-            'UPDATE users SET failed_attempts = ?, locked_until = ? WHERE id = ?',
-            [newFailedAttempts, lockedUntil, user.id]
-        );
-        await this.logActivity(user.id, 'failed_login');
-        
-        return { success: false, message: 'Invalid credentials...', userData: null };
-    }
-}
-```
-
 #### **6. Activity Logging**
-- **Method**: `logActivity(userId, actionType, ...)`
-- **Log Entry**: Creates entry in `activity_logs` table with:
-  - `user_id`: User ID
-  - `action_type`: 'login' or 'failed_login'
-  - `timestamp`: Current timestamp
+- **Model**: `Backend/models/logs.js`
+- **Entry**: Uses MongoDB to persist login/failed-login/logout events.
 
 ---
 
@@ -246,6 +160,7 @@ async authenticateUser(usernameOrEmail, password) {
 4. Clears currentUser: this.currentUser = null
 5. Removes persisted session from localStorage:
    - window.Utils.removeLocalStorage('incucount_current_user')
+   - window.Utils.removeLocalStorage('incucount_auth_token')
 6. Shows auth screen: this.showScreen('auth')
 ```
 
@@ -354,16 +269,16 @@ Show Auth Screen
 ## 🔑 **KEY COMPONENTS**
 
 ### **IPC Channels**
-- `auth-login` ✅ Implemented
-- `auth-logout` ❌ **NOT Implemented** (handler missing)
+- `auth-login` ⛔️ Legacy IPC call, superseded by REST API (`/auth/login`)
+- `auth-logout` ⛔️ Legacy IPC call, superseded by REST API (`/auth/logout`)
 
 ### **Database Tables**
-- **users**: Stores user credentials and login state
-- **activity_logs**: Stores login/logout/failed_login events
+- **MongoDB `users` collection**: Stores user credentials and login state
+- **MongoDB `logs` collection**: Stores login/logout/failed_login events
 
 ### **Session Management**
-- **Frontend**: localStorage (`incucount_current_user`)
-- **Backend**: SQLite database (users.last_login)
+- **Frontend**: localStorage (`incucount_current_user` plus `incucount_auth_token`)
+- **Backend**: MongoDB (users.last_login, lock metadata)
 
 ### **Security Features**
 - Password hashing with bcrypt + salt
@@ -387,9 +302,8 @@ Show Auth Screen
 
 ## 📝 **RECOMMENDATIONS**
 
-1. **Add Logout Handler**: Implement `auth-logout` IPC handler in `main.js`
-2. **Token-based Auth**: Consider implementing JWT tokens for better session management
-3. **Session Expiry**: Add session timeout functionality
-4. **Refresh Tokens**: Implement token refresh mechanism
-5. **Better Error Handling**: Add more detailed error messages for different failure scenarios
+- **Token refresh & expiry**: Introduce refresh tokens or silent re-auth when JWT nears expiration.
+- **Guarded API requests**: Ensure backend enforces Authorization header on protected routes.
+- **Session expiry UX**: Add UI prompts when token is invalid/expired.
+- **Improved offline handling**: Decide how the app should behave when API is unreachable but cached token exists.
 
