@@ -1,6 +1,7 @@
 import express from 'express';
 import authRoutes from './routes/authRoutes.js';
 import colonyProfileRoutes from './routes/colonyProfileRoutes.js';
+import downloadRoutes from './routes/download.js';
 import dotenv from 'dotenv';
 import mongoose from 'mongoose';
 import cors from 'cors';
@@ -27,6 +28,7 @@ app.use((req, res, next) => {
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/colony-profiles', colonyProfileRoutes);
+app.use('/api', downloadRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
